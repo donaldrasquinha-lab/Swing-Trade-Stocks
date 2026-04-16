@@ -117,6 +117,39 @@ NSE_UNIVERSE = {
         "LTTS":        "NSE_EQ|INE010V01017",
         "OFSS":        "NSE_EQ|INE881D01027",
     },
+    "Sensex 30": {
+        # BSE Sensex 30 constituents — fetched via NSE dual-listing (same ISIN, same price).
+        "RELIANCE":    "NSE_EQ|INE002A01018",
+        "TCS":         "NSE_EQ|INE467B01029",
+        "HDFCBANK":    "NSE_EQ|INE040A01034",
+        "INFY":        "NSE_EQ|INE009A01021",
+        "ICICIBANK":   "NSE_EQ|INE090A01021",
+        "HINDUNILVR":  "NSE_EQ|INE030A01027",
+        "ITC":         "NSE_EQ|INE154A01025",
+        "SBIN":        "NSE_EQ|INE062A01020",
+        "BHARTIARTL":  "NSE_EQ|INE397D01024",
+        "KOTAKBANK":   "NSE_EQ|INE237A01028",
+        "LT":          "NSE_EQ|INE018A01030",
+        "AXISBANK":    "NSE_EQ|INE238A01034",
+        "ASIANPAINT":  "NSE_EQ|INE021A01026",
+        "MARUTI":      "NSE_EQ|INE585B01010",
+        "SUNPHARMA":   "NSE_EQ|INE044A01036",
+        "TITAN":       "NSE_EQ|INE280A01028",
+        "ULTRACEMCO":  "NSE_EQ|INE481G01011",
+        "NESTLEIND":   "NSE_EQ|INE239A01024",
+        "BAJFINANCE":  "NSE_EQ|INE296A01024",
+        "M&M":         "NSE_EQ|INE101A01026",
+        "HCLTECH":     "NSE_EQ|INE860A01027",
+        "POWERGRID":   "NSE_EQ|INE752E01010",
+        "NTPC":        "NSE_EQ|INE733E01010",
+        "TATAMOTORS":  "NSE_EQ|INE155A01022",
+        "TATASTEEL":   "NSE_EQ|INE081A01020",
+        "ADANIPORTS":  "NSE_EQ|INE742F01042",
+        "BAJAJFINSV":  "NSE_EQ|INE918I01026",
+        "BAJAJ-AUTO":  "NSE_EQ|INE917I01010",
+        "INDUSINDBK":  "NSE_EQ|INE095A01012",
+        "WIPRO":       "NSE_EQ|INE075A01022",
+    },
 }
 
 # ----------------------------- Upstox API Helpers ----------------------------- #
@@ -253,8 +286,13 @@ def analyze_stock(token, symbol, instrument_key):
     last = df.iloc[-1]
     price = float(last["Close"])
     perf_20d = ((price / close.iloc[-21]) - 1) * 100 if len(close) > 21 else 0.0
-    high_52w = close.tail(252).max() if len(close) >= 50 else close.max()
+
+    # 52-week high / low (use 252 trading days, or all available if shorter)
+    lookback = min(252, len(close))
+    high_52w = float(close.tail(lookback).max())
+    low_52w = float(close.tail(lookback).min())
     from_high = ((price / high_52w) - 1) * 100
+    from_low = ((price / low_52w) - 1) * 100
 
     score = 50.0
     signals = []
@@ -305,6 +343,22 @@ def analyze_stock(token, symbol, instrument_key):
     target_1 = price + (3 * current_atr)
     target_2 = price + (5 * current_atr)
 
+    # Uptrend classification: price above both 50 & 200 SMA AND 50 above 200 (golden-cross zone)
+    s50 = sma50.iloc[-1]
+    s200 = sma200.iloc[-1]
+    is_uptrend = (
+        (not np.isnan(s50)) and (not np.isnan(s200))
+        and price > s50 and price > s200 and s50 > s200
+    )
+    # Fallback uptrend (when <200 days of data): price above 50 SMA and 20 > 50
+    if not is_uptrend and np.isnan(s200):
+        s20 = sma20.iloc[-1]
+        if (not np.isnan(s20)) and (not np.isnan(s50)) and price > s50 and s20 > s50:
+            is_uptrend = True
+
+    # Near 52-week low: within 5% of 52w low
+    near_52w_low = from_low <= 5.0
+
     return {
         "symbol": symbol,
         "instrument_key": instrument_key,
@@ -314,6 +368,11 @@ def analyze_stock(token, symbol, instrument_key):
         "adx": round(current_adx, 1),
         "perf_20d": round(perf_20d, 2),
         "from_52w_high": round(from_high, 2),
+        "from_52w_low": round(from_low, 2),
+        "low_52w": round(low_52w, 2),
+        "high_52w": round(high_52w, 2),
+        "is_uptrend": bool(is_uptrend),
+        "near_52w_low": bool(near_52w_low),
         "atr": round(current_atr, 2),
         "atr_pct": round((current_atr / price) * 100, 2),
         "stop_loss": round(stop_loss, 2),
@@ -345,10 +404,17 @@ def plot_stock(result):
     df["SMA20"] = df["Close"].rolling(20).mean()
     df["SMA50"] = df["Close"].rolling(50).mean()
 
+    # Title badge: mark dip-buy setups distinctly
+    badge = ""
+    if result.get("is_uptrend") and result.get("near_52w_low"):
+        badge = " • 🎯 Dip-buy (uptrend @ 52w low)"
+    elif result.get("is_uptrend"):
+        badge = " • 📈 Uptrend"
+
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06,
         row_heights=[0.75, 0.25],
-        subplot_titles=(f"{result['symbol']} — ₹{result['price']}", "Volume"),
+        subplot_titles=(f"{result['symbol']} — ₹{result['price']}{badge}", "Volume"),
     )
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["Open"], high=df["High"],
@@ -364,6 +430,10 @@ def plot_stock(result):
                   annotation_text=f"T1 ₹{result['target_1']}", row=1, col=1)
     fig.add_hline(y=result["target_2"], line_dash="dot", line_color="darkgreen",
                   annotation_text=f"T2 ₹{result['target_2']}", row=1, col=1)
+    # 52-week low line (helpful context for dip candidates)
+    if "low_52w" in result:
+        fig.add_hline(y=result["low_52w"], line_dash="dot", line_color="purple",
+                      annotation_text=f"52w Low ₹{result['low_52w']}", row=1, col=1)
     fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume",
                          marker_color="rgba(100,100,200,0.5)"), row=2, col=1)
     fig.update_layout(
@@ -604,21 +674,118 @@ if "results" in st.session_state:
               f"{(total_risk/capital)*100:.2f}% of capital")
     c3.metric("Cash reserve", f"₹{capital - total_invest:,.0f}")
 
+    # ---------------- Oversold in Uptrend (Dip-Buy Candidates) ---------------- #
+    st.divider()
+    st.subheader("🎯 Dip-Buy Watchlist — Oversold in Uptrend")
+    st.caption(
+        "Stocks in a confirmed uptrend (price > 50 SMA, 50 SMA > 200 SMA) "
+        "that are currently **at or near their 52-week low**. These are counter-trend "
+        "pullbacks in structurally strong stocks — potential mean-reversion swing entries."
+    )
+
+    dip_proximity = st.slider(
+        "Proximity to 52-week low (%)", 0, 15, 5, 1,
+        help="Include stocks within this % of their 52w low",
+        key="dip_proximity",
+    )
+
+    # Scan ALL results (not filtered), since dip-buys often score below the min_score cutoff
+    dip_candidates = [
+        r for r in results
+        if r["is_uptrend"] and r["from_52w_low"] <= dip_proximity
+    ]
+    dip_candidates.sort(key=lambda x: x["from_52w_low"])
+
+    if not dip_candidates:
+        st.info(
+            f"No uptrend stocks currently within {dip_proximity}% of their 52-week low. "
+            "This is actually a healthy-market signal — dips happen more in choppy markets."
+        )
+    else:
+        st.success(
+            f"Found **{len(dip_candidates)}** dip-buy candidate(s). "
+            "These are tagged differently from breakout picks — use wider stops."
+        )
+
+        dip_rows = []
+        capital_per_position = capital / max_positions
+        for r in dip_candidates:
+            sizing = position_sizing(capital_per_position, r["price"], r["stop_loss"], risk_pct)
+            dip_rows.append({
+                "Symbol": r["symbol"],
+                "Price": r["price"],
+                "52w Low": r["low_52w"],
+                "From Low %": r["from_52w_low"],
+                "52w High": r["high_52w"],
+                "From High %": r["from_52w_high"],
+                "RSI": r["rsi"],
+                "ADX": r["adx"],
+                "Shares": sizing["shares"],
+                "Investment": sizing["investment"],
+                "Stop Loss": r["stop_loss"],
+                "Target 1": r["target_1"],
+                "Target 2": r["target_2"],
+                "Risk (₹)": sizing["risk_amount"],
+                "Score": r["score"],
+            })
+
+        dip_df = pd.DataFrame(dip_rows)
+        st.dataframe(
+            dip_df, use_container_width=True, hide_index=True,
+            column_config={
+                "Price": st.column_config.NumberColumn(format="₹%.2f"),
+                "52w Low": st.column_config.NumberColumn(format="₹%.2f"),
+                "From Low %": st.column_config.NumberColumn(format="+%.2f%%"),
+                "52w High": st.column_config.NumberColumn(format="₹%.2f"),
+                "From High %": st.column_config.NumberColumn(format="%.2f%%"),
+                "Investment": st.column_config.NumberColumn(format="₹%.0f"),
+                "Stop Loss": st.column_config.NumberColumn(format="₹%.2f"),
+                "Target 1": st.column_config.NumberColumn(format="₹%.2f"),
+                "Target 2": st.column_config.NumberColumn(format="₹%.2f"),
+                "Risk (₹)": st.column_config.NumberColumn(format="₹%.0f"),
+                "Score": st.column_config.ProgressColumn(
+                    "Score", min_value=0, max_value=100, format="%.1f"),
+            },
+        )
+
+        with st.expander("⚠️ Why treat these differently from breakout picks"):
+            st.markdown("""
+            **These are counter-trend setups.** The stock is in a long-term uptrend
+            (above 50 & 200 SMA) but has pulled back hard enough to touch its 52-week low.
+            This can mean one of two things:
+
+            1. **Buyable dip** — profit-taking in a strong stock; reversion likely
+            2. **Trend breaking** — the uptrend is about to fail
+
+            **How to trade them:**
+            - Wait for a **reversal candle** or bounce off the low before entering
+            - Use a **tighter stop** just below the 52w low (not the default 2×ATR which may be too wide)
+            - Keep **position size smaller** — these are lower-probability than breakout setups
+            - Watch the **volume** on the bounce — low-volume bounces often fail
+            - Check for **fundamental news** — an earnings miss or sector rotation can invalidate the setup
+            """)
+
+    st.divider()
     st.subheader("📊 Stock Chart")
+    # Chart selector — include both filtered picks AND dip candidates
+    chart_pool = list({r["symbol"]: r for r in (filtered + dip_candidates)}.values())
+    chart_pool.sort(key=lambda x: x["score"], reverse=True)
+
     selected_symbol = st.selectbox(
         "Select stock",
-        [r["symbol"] for r in filtered],
+        [r["symbol"] for r in chart_pool],
         index=0,
     )
-    selected = next(r for r in filtered if r["symbol"] == selected_symbol)
+    selected = next(r for r in chart_pool if r["symbol"] == selected_symbol)
     st.plotly_chart(plot_stock(selected), use_container_width=True)
 
     with st.expander("📋 Full leaderboard"):
         full_df = pd.DataFrame([{
             "Symbol": r["symbol"], "Score": r["score"], "Price": r["price"],
             "RSI": r["rsi"], "ADX": r["adx"], "20d %": r["perf_20d"],
-            "From 52wH %": r["from_52w_high"], "ATR %": r["atr_pct"],
-            "Signals": r["signals"],
+            "From 52wH %": r["from_52w_high"], "From 52wL %": r["from_52w_low"],
+            "Uptrend": "✅" if r["is_uptrend"] else "—",
+            "ATR %": r["atr_pct"], "Signals": r["signals"],
         } for r in filtered])
         st.dataframe(full_df, use_container_width=True, hide_index=True)
 
